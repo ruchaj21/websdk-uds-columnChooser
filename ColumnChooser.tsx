@@ -16,6 +16,9 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
   const [availableCols, setAvailableCols] = useState<ColumnItem[]>([]);
   const [visibleCols, setVisibleCols] = useState<ColumnItem[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
+  
+  // NEW: Track which visible columns are checked for moving
+  const [checkedVisibleIds, setCheckedVisibleIds] = useState<Set<string>>(new Set());
 
   const loadCurrentGridState = () => {
     if (!gridApi) return;
@@ -30,6 +33,12 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
       if (!col) return;
       
       const colDef = col.getColDef();
+
+      // Skip this column entirely if hideInChooser is true
+      if ((colDef as any).hideInChooser === true) {
+        return;
+      }
+
       const headerName = colDef.headerName || colDef.field || col.getColId();
       const item: ColumnItem = { colId: col.getColId(), headerName };
 
@@ -43,9 +52,9 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
     setVisibleCols(visible);
     setAvailableCols(available);
     setSearchTerm("");
+    setCheckedVisibleIds(new Set()); // Reset checked state
   };
 
-  // Load state when modal opens
   useEffect(() => {
     if (isOpen) {
       loadCurrentGridState();
@@ -58,6 +67,15 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
     );
   }, [availableCols, searchTerm]);
 
+  const toggleCheck = (colId: string) => {
+    setCheckedVisibleIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(colId)) newSet.delete(colId);
+      else newSet.add(colId);
+      return newSet;
+    });
+  };
+
   const moveToVisible = (col: ColumnItem) => {
     setAvailableCols((prev) => prev.filter((c) => c.colId !== col.colId));
     setVisibleCols((prev) => [...prev, col]);
@@ -66,6 +84,12 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
   const moveToAvailable = (col: ColumnItem) => {
     setVisibleCols((prev) => prev.filter((c) => c.colId !== col.colId));
     setAvailableCols((prev) => [...prev, col]);
+    // Remove from checked set if it was checked
+    setCheckedVisibleIds(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(col.colId);
+      return newSet;
+    });
   };
 
   const moveAllToVisible = () => {
@@ -76,39 +100,77 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
   const moveAllToAvailable = () => {
     setAvailableCols((prev) => [...prev, ...visibleCols]);
     setVisibleCols([]);
+    setCheckedVisibleIds(new Set());
   };
 
-  const moveUp = (index: number) => {
-    if (index === 0) return;
-    setVisibleCols((prev) => {
-      const newCols = [...prev];
-      [newCols[index - 1], newCols[index]] = [newCols[index], newCols[index - 1]];
-      return newCols;
+  // --- NEW BULK MOVEMENT LOGIC ---
+  const handleMoveUp = () => {
+    setVisibleCols(prev => {
+      const result = [...prev];
+      for (let i = 1; i < result.length; i++) {
+        if (checkedVisibleIds.has(result[i].colId) && !checkedVisibleIds.has(result[i-1].colId)) {
+          [result[i-1], result[i]] = [result[i], result[i-1]];
+        }
+      }
+      return result;
     });
   };
 
-  const moveDown = (index: number) => {
-    if (index === visibleCols.length - 1) return;
-    setVisibleCols((prev) => {
-      const newCols = [...prev];
-      [newCols[index], newCols[index + 1]] = [newCols[index + 1], newCols[index]];
-      return newCols;
+  const handleMoveDown = () => {
+    setVisibleCols(prev => {
+      const result = [...prev];
+      for (let i = result.length - 2; i >= 0; i--) {
+        if (checkedVisibleIds.has(result[i].colId) && !checkedVisibleIds.has(result[i+1].colId)) {
+          [result[i], result[i+1]] = [result[i+1], result[i]];
+        }
+      }
+      return result;
+    });
+  };
+
+  const handleMoveToTop = () => {
+    setVisibleCols(prev => {
+      const selected = prev.filter(c => checkedVisibleIds.has(c.colId));
+      const unselected = prev.filter(c => !checkedVisibleIds.has(c.colId));
+      return [...selected, ...unselected];
+    });
+  };
+
+  const handleMoveToBottom = () => {
+    setVisibleCols(prev => {
+      const selected = prev.filter(c => checkedVisibleIds.has(c.colId));
+      const unselected = prev.filter(c => !checkedVisibleIds.has(c.colId));
+      return [...unselected, ...selected];
     });
   };
 
   const handleApply = () => {
     if (!gridApi) return;
 
-    // The robust exhaustive state mapping!
-    const exhaustiveColumnState: ColumnState[] = [];
+    const allColumns = gridApi.getColumns() || [];
+    const currentState = gridApi.getColumnState();
+    
+    const exhaustiveColumnState: ColumnState[] = new Array(currentState.length);
 
-    visibleCols.forEach((col) => {
-      exhaustiveColumnState.push({ colId: col.colId, hide: false });
+    currentState.forEach((state, index) => {
+      const col = allColumns.find(c => c.getColId() === state.colId);
+      if (col && (col.getColDef() as any).hideInChooser === true) {
+        exhaustiveColumnState[index] = { colId: state.colId, hide: state.hide };
+      }
     });
 
-    availableCols.forEach((col) => {
-      exhaustiveColumnState.push({ colId: col.colId, hide: true });
-    });
+    const managedStates: ColumnState[] = [
+      ...visibleCols.map((col) => ({ colId: col.colId, hide: false })),
+      ...availableCols.map((col) => ({ colId: col.colId, hide: true }))
+    ];
+
+    let managedIndex = 0;
+    for (let i = 0; i < exhaustiveColumnState.length; i++) {
+      if (!exhaustiveColumnState[i]) {
+        exhaustiveColumnState[i] = managedStates[managedIndex];
+        managedIndex++;
+      }
+    }
 
     gridApi.applyColumnState({
       state: exhaustiveColumnState,
@@ -124,135 +186,78 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
     <>
       <style>{`
         .custom-chooser-overlay {
-          position: fixed;
-          top: 0; left: 0; right: 0; bottom: 0;
-          background: rgba(0, 0, 0, 0.4);
-          z-index: 9999;
-          display: flex;
-          align-items: center;
-          justify-content: center;
+          position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+          background: rgba(0, 0, 0, 0.4); z-index: 9999;
+          display: flex; align-items: center; justify-content: center;
           font-family: Arial, sans-serif;
         }
         .custom-chooser-modal {
-          background: #f4f4f4;
-          width: 650px;
-          border: 1px solid #a0a0a0;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-          display: flex;
-          flex-direction: column;
+          background: #f4f4f4; width: 680px;
+          border: 1px solid #a0a0a0; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+          display: flex; flex-direction: column;
         }
         .custom-chooser-header {
-          padding: 12px 16px;
-          border-bottom: 1px solid #d0d0d0;
-          font-size: 14px;
-          color: #333;
+          padding: 12px 16px; border-bottom: 1px solid #d0d0d0;
+          font-size: 14px; color: #333;
         }
         .custom-chooser-body {
-          padding: 16px;
-          display: flex;
-          gap: 20px;
-          background: #ececec;
+          padding: 16px; display: flex; gap: 20px; background: #ececec;
         }
         .chooser-column {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
+          flex: 1; display: flex; flex-direction: column;
         }
         .chooser-col-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-end;
-          margin-bottom: 8px;
-          font-size: 13px;
-          color: #555;
+          display: flex; justify-content: space-between; align-items: flex-end;
+          margin-bottom: 8px; font-size: 13px; color: #555;
         }
         .chooser-link-btn {
-          background: none;
-          border: none;
-          color: #006699;
-          font-size: 12px;
-          cursor: pointer;
-          padding: 0;
+          background: none; border: none; color: #006699;
+          font-size: 12px; cursor: pointer; padding: 0;
         }
-        .chooser-link-btn:hover {
-          text-decoration: underline;
-        }
+        .chooser-link-btn:hover { text-decoration: underline; }
         .chooser-list-container {
-          background: #fff;
-          border: 1px solid #bbb;
-          height: 300px;
-          display: flex;
-          flex-direction: column;
+          background: #fff; border: 1px solid #bbb; height: 300px;
+          display: flex; flex-direction: column;
         }
         .chooser-search {
-          border: none;
-          border-bottom: 1px solid #ddd;
-          padding: 8px 12px;
-          width: 100%;
-          outline: none;
-          font-size: 13px;
+          border: none; border-bottom: 1px solid #ddd;
+          padding: 8px 12px; width: 100%; outline: none; font-size: 13px;
         }
         .chooser-list {
-          list-style: none;
-          margin: 0;
-          padding: 0;
-          overflow-y: auto;
-          flex-grow: 1;
+          list-style: none; margin: 0; padding: 0;
+          overflow-y: auto; flex-grow: 1;
         }
         .chooser-list-item {
-          padding: 8px 12px;
-          border-bottom: 1px solid #eee;
-          font-size: 13px;
-          color: #333;
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          cursor: pointer;
+          padding: 8px 12px; border-bottom: 1px solid #eee;
+          font-size: 13px; color: #333; display: flex;
+          justify-content: space-between; align-items: center;
         }
-        .chooser-list-item:hover {
-          background: #f0f8ff;
-        }
-        .action-btns button {
-          background: #f9f9f9;
-          border: 1px solid #ccc;
-          color: #555;
-          cursor: pointer;
-          border-radius: 3px;
-          margin-left: 4px;
-          padding: 2px 6px;
-        }
-        .action-btns button:hover {
-          background: #e0e0e0;
-        }
+        .chooser-list-item:hover { background: #f0f8ff; }
         .custom-chooser-footer {
-          padding: 12px 16px;
-          display: flex;
-          justify-content: flex-end;
-          gap: 10px;
-          border-top: 1px solid #d0d0d0;
-          background: #e8e8e8;
+          padding: 12px 16px; display: flex; justify-content: space-between; align-items: center;
+          border-top: 1px solid #d0d0d0; background: #e8e8e8;
+        }
+        .movement-actions {
+          display: flex; gap: 6px;
+        }
+        .btn-move {
+          background: #fff; border: 1px solid #ccc; color: #333;
+          padding: 4px 10px; border-radius: 3px; cursor: pointer; font-size: 12px;
+          display: flex; align-items: center; gap: 4px;
+        }
+        .btn-move:hover { background: #e0e0e0; }
+        .footer-buttons {
+          display: flex; gap: 10px;
         }
         .btn-cancel {
-          background: #e0e0e0;
-          border: 1px solid #aaa;
-          color: #333;
-          padding: 6px 16px;
-          border-radius: 3px;
-          cursor: pointer;
-          font-weight: bold;
+          background: #e0e0e0; border: 1px solid #aaa; color: #333;
+          padding: 6px 16px; border-radius: 3px; cursor: pointer; font-weight: bold;
         }
         .btn-apply {
-          background: #5c6e3b; 
-          border: 1px solid #4a5a2e;
-          color: #fff;
-          padding: 6px 16px;
-          border-radius: 3px;
-          cursor: pointer;
-          font-weight: bold;
+          background: #5c6e3b; border: 1px solid #4a5a2e; color: #fff;
+          padding: 6px 16px; border-radius: 3px; cursor: pointer; font-weight: bold;
         }
-        .btn-apply:hover {
-          background: #4a5a2e;
-        }
+        .btn-apply:hover { background: #4a5a2e; }
       `}</style>
 
       <div className="custom-chooser-overlay">
@@ -279,7 +284,7 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
                 />
                 <ul className="chooser-list">
                   {filteredAvailableCols.map((col) => (
-                    <li key={col.colId} className="chooser-list-item" onClick={() => moveToVisible(col)}>
+                    <li key={col.colId} className="chooser-list-item" style={{ cursor: 'pointer' }} onClick={() => moveToVisible(col)}>
                       {col.headerName}
                     </li>
                   ))}
@@ -298,21 +303,22 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
               </div>
               <div className="chooser-list-container">
                 <ul className="chooser-list">
-                  {visibleCols.map((col, index) => (
+                  {visibleCols.map((col) => (
                     <li key={col.colId} className="chooser-list-item">
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                         <input 
                            type="checkbox" 
-                           checked={true} 
-                           onChange={() => moveToAvailable(col)} 
+                           checked={checkedVisibleIds.has(col.colId)} 
+                           onChange={() => toggleCheck(col.colId)} 
                            style={{ cursor: 'pointer' }}
                         />
-                        <span>{col.headerName}</span>
+                        <span onClick={() => toggleCheck(col.colId)} style={{ cursor: 'pointer' }}>
+                          {col.headerName}
+                        </span>
                       </div>
-                      <div className="action-btns">
-                        <button onClick={(e) => { e.stopPropagation(); moveUp(index); }} disabled={index === 0}>↑</button>
-                        <button onClick={(e) => { e.stopPropagation(); moveDown(index); }} disabled={index === visibleCols.length - 1}>↓</button>
-                      </div>
+                      <button className="chooser-link-btn" style={{ color: '#d9534f' }} onClick={() => moveToAvailable(col)}>
+                        Remove
+                      </button>
                     </li>
                   ))}
                 </ul>
@@ -321,8 +327,22 @@ export const CustomColumnChooser: React.FC<ColumnChooserProps> = ({ isOpen, onCl
           </div>
 
           <div className="custom-chooser-footer">
-            <button onClick={onClose} className="btn-cancel">Cancel</button>
-            <button onClick={handleApply} className="btn-apply">Apply</button>
+            <div className="movement-actions">
+              {/* Only show these buttons if at least 1 checkbox is checked */}
+              {checkedVisibleIds.size > 0 && (
+                <>
+                  <button onClick={handleMoveToTop} className="btn-move">⇈ Top</button>
+                  <button onClick={handleMoveUp} className="btn-move">↑ Up</button>
+                  <button onClick={handleMoveDown} className="btn-move">↓ Down</button>
+                  <button onClick={handleMoveToBottom} className="btn-move">⇊ Bottom</button>
+                </>
+              )}
+            </div>
+            
+            <div className="footer-buttons">
+              <button onClick={onClose} className="btn-cancel">Cancel</button>
+              <button onClick={handleApply} className="btn-apply">Apply</button>
+            </div>
           </div>
 
         </div>
